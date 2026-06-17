@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: cymor-world-cup-bot
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: FOOTBALL_API_KEY
+        sync: false
+      - key: ODDS_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
