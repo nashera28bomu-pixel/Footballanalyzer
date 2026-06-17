@@ -2,6 +2,11 @@ const footballApi = require('../services/footballApi');
 const { formatMatchTime, formatMatchDate, statusLabel, isToday, isTomorrow, isYesterday } = require('../utils/time');
 const { getBackMenu } = require('../utils/menu');
 
+function escMd(text) {
+  if (!text) return '';
+  return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+}
+
 async function handleTodayFixtures(ctx) {
   await ctx.answerCbQuery('Loading fixtures...');
   const loadingMsg = await ctx.reply('📅 Fetching today\'s fixtures...');
@@ -15,7 +20,7 @@ async function handleTodayFixtures(ctx) {
     if (todayMatches.length === 0) {
       await ctx.deleteMessage(loadingMsg.message_id);
       return ctx.reply(
-        `📅 *No World Cup matches today in EAT*\n\nCheck upcoming fixtures for the next games! 👇`,
+        `📅 *No World Cup matches today in EAT*\n\nCheck upcoming fixtures for the next games\\! 👇`,
         { parse_mode: 'MarkdownV2', ...getBackMenu() }
       );
     }
@@ -73,7 +78,6 @@ async function handleResults(ctx) {
     const data = await footballApi.getYesterdayMatches();
     const matches = (data.matches || []).filter(m => m.status === 'FINISHED');
 
-    // Also check today's finished
     const todayData = await footballApi.getTodayMatches();
     const todayFinished = (todayData.matches || []).filter(m =>
       m.status === 'FINISHED' && isToday(m.utcDate)
@@ -165,23 +169,6 @@ async function handleUpcoming(ctx) {
     console.error('Upcoming error:', err.message);
     await ctx.reply('⚠️ Could not load schedule.', getBackMenu());
   }
-}
-
-function escMd(text) {
-  if (!text) return '';
-  return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
-}
-
-function isTomorrow(utcDateStr) {
-  const EAT_OFFSET = 3 * 60 * 60 * 1000;
-  const eat = new Date(new Date(utcDateStr).getTime() + EAT_OFFSET);
-  const now = new Date(Date.now() + EAT_OFFSET);
-  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  return (
-    eat.getUTCFullYear() === tomorrow.getUTCFullYear() &&
-    eat.getUTCMonth() === tomorrow.getUTCMonth() &&
-    eat.getUTCDate() === tomorrow.getUTCDate()
-  );
 }
 
 module.exports = { handleTodayFixtures, handleResults, handleUpcoming };
