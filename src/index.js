@@ -3,21 +3,13 @@ const { Telegraf, session } = require('telegraf');
 const mongoose = require('mongoose');
 const express = require('express');
 
-// Models
 const User = require('./models/User');
-
-// Services
 const { initCron } = require('./services/cron');
 const {
-  getOrCreateReferral,
-  processReferral,
-  getReferralMessage,
-  canAccess,
-  getLockedMessage,
-  TIERS
+  getOrCreateReferral, processReferral, getReferralMessage,
+  canAccess, getLockedMessage, TIERS
 } = require('./services/referral');
 
-// Commands
 const { handleTodayFixtures, handleResults, handleUpcoming } = require('./commands/fixtures');
 const { handleLiveScores } = require('./commands/live');
 const { handleStandings, handleGroupStanding } = require('./commands/standings');
@@ -28,316 +20,317 @@ const { handleH2HMenu, handleH2H } = require('./commands/h2h');
 const { handleTeamMenu, handleTeamSearch } = require('./commands/team');
 const { handleMyAlerts, handleToggleSub, handleToggleGoals, handleToggleKickoff } = require('./commands/notify');
 const {
-  isAdmin, pendingBroadcast,
+  isAdmin, pendingBroadcast, pendingPromote,
   handleAdminPanel, handleAdminBroadcastPrompt, handleAdminBroadcastMessage,
-  handleConfirmBroadcast, handleAdminStats
+  handleAdminPromotePrompt, handleAdminPromoteMessage,
+  handleConfirmBroadcast, handleCancelBroadcast, handleAdminStats
 } = require('./commands/admin');
-
-// Utils
-const {
-  getWelcomeMessage, getReturnMessage, getMainMenu, getBackMenu, getAboutMessage
-} = require('./utils/menu');
+const { getWelcomeMessage, getReturnMessage, getMainMenu, getBackMenu, getAboutMessage } = require('./utils/menu');
 
 function escMd(text) {
   if (!text) return '';
   return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
-// ── BOT INIT ─────────────────────────────────────────────
+// ── BOT ──────────────────────────────────────────────────
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(session());
 
-// ── DATABASE ─────────────────────────────────────────────
 async function connectDB() {
   await mongoose.connect(process.env.MONGODB_URI);
   console.log('✅ MongoDB connected');
 }
 
-// ── UPSERT USER ──────────────────────────────────────────
 async function upsertUser(from) {
-  const user = await User.findOneAndUpdate(
+  return User.findOneAndUpdate(
     { telegramId: from.id },
     {
-      $set: {
-        username: from.username || '',
-        firstName: from.first_name || '',
-        lastName: from.last_name || '',
-        lastSeen: new Date()
-      },
-      $setOnInsert: {
-        isSubscribed: true,
-        notifyGoals: true,
-        notifyKickoff: true,
-        isFirstVisit: true,
-        joinedAt: new Date()
-      }
+      $set: { username: from.username || '', firstName: from.first_name || '', lastName: from.last_name || '', lastSeen: new Date() },
+      $setOnInsert: { isSubscribed: true, notifyGoals: true, notifyKickoff: true, isFirstVisit: true, joinedAt: new Date() }
     },
     { upsert: true, new: true }
   );
-  return user;
 }
 
-// ── /start ────────────────────────────────────────────────
+// ── /start ───────────────────────────────────────────────
 bot.start(async (ctx) => {
   const from = ctx.from;
   const user = await upsertUser(from);
-
-  // Handle referral link: /start ref_CYMOR123
   const startPayload = ctx.startPayload;
-  let referralResult = null;
 
-  if (startPayload && startPayload.startsWith('ref_')) {
+  if (startPayload?.startsWith('ref_')) {
     const refCode = startPayload.replace('ref_', '');
-    referralResult = await processReferral(from.id, refCode).catch(() => null);
+    const result = await processReferral(from.id, refCode).catch(() => null);
+    if (result?.tierUpgraded) {
+      const tier = TIERS[result.newTier];
+      try {
+        await ctx.telegram.sendMessage(
+          result.referrerId,
+          `🎉 *New referral joined\\!*\n${tier.emoji} You've unlocked *${escMd(tier.name)} Tier\\!*\nTotal referrals: *${result.referralCount}*`,
+          { parse_mode: 'MarkdownV2' }
+        );
+      } catch (_) {}
+    }
   }
 
-  // Ensure referral doc exists
-  const refDoc = await getOrCreateReferral(from.id);
+  await getOrCreateReferral(from.id);
 
-  // Check if first visit
   const isFirst = user.isFirstVisit;
-  if (isFirst) {
-    await User.findOneAndUpdate({ telegramId: from.id }, { isFirstVisit: false });
-  }
+  if (isFirst) await User.findOneAndUpdate({ telegramId: from.id }, { isFirstVisit: false });
 
-  const message = isFirst
-    ? getWelcomeMessage(from.first_name)
-    : getReturnMessage(from.first_name);
-
-  await ctx.reply(message, { parse_mode: 'MarkdownV2', ...getMainMenu() });
-
-  // If referred, notify referrer about tier upgrade
-  if (referralResult?.tierUpgraded) {
-    const newTier = TIERS[referralResult.newTier];
-    try {
-      await ctx.telegram.sendMessage(
-        referralResult.referrerId,
-        `🎉 *Someone joined using your referral link\\!*\n\n` +
-        `${newTier.emoji} You've unlocked *${escMd(newTier.name)} Tier\\!*\n` +
-        `${escMd(newTier.unlockMsg || '')}\n\n` +
-        `Total Referrals: *${referralResult.referralCount}*`,
-        { parse_mode: 'MarkdownV2' }
-      );
-    } catch (_) {}
-  }
+  const msg = isFirst ? getWelcomeMessage(from.first_name) : getReturnMessage(from.first_name);
+  await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...getMainMenu() });
 });
 
-// ── /menu ─────────────────────────────────────────────────
+// ── SHORTCUT COMMANDS ────────────────────────────────────
 bot.command('menu', async (ctx) => {
   await upsertUser(ctx.from);
   await ctx.reply('🏠 *Main Menu*', { parse_mode: 'MarkdownV2', ...getMainMenu() });
 });
 
-// ── /referral ─────────────────────────────────────────────
-bot.command('referral', async (ctx) => {
+bot.command('live', async (ctx) => {
   await upsertUser(ctx.from);
-  const refDoc = await getOrCreateReferral(ctx.from.id);
-  const botInfo = await bot.telegram.getMe();
-  const { msg } = getReferralMessage(refDoc, botInfo.username);
-  await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...getBackMenu() });
+  await handleLiveScores({ ...ctx, callbackQuery: null, answerCbQuery: async () => {} });
 });
 
-// ── /notify ───────────────────────────────────────────────
-bot.command('notify', async (ctx) => {
+bot.command('fixtures', async (ctx) => {
   await upsertUser(ctx.from);
-  await handleMyAlerts({ ...ctx, answerCbQuery: async () => {} });
+  await handleTodayFixtures({ ...ctx, callbackQuery: null, answerCbQuery: async () => {} });
 });
 
-// ── /team [name] ──────────────────────────────────────────
+bot.command('results', async (ctx) => {
+  await upsertUser(ctx.from);
+  await handleResults({ ...ctx, callbackQuery: null, answerCbQuery: async () => {} });
+});
+
+bot.command('standings', async (ctx) => {
+  await upsertUser(ctx.from);
+  await handleStandings({ ...ctx, callbackQuery: null, answerCbQuery: async () => {} });
+});
+
+bot.command('upcoming', async (ctx) => {
+  await upsertUser(ctx.from);
+  await handleUpcoming({ ...ctx, callbackQuery: null, answerCbQuery: async () => {} });
+});
+
+bot.command('predict', async (ctx) => {
+  await upsertUser(ctx.from);
+  if (!await canAccess(ctx.from.id, 'predictions')) {
+    return ctx.reply(getLockedMessage('predictions'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
+  }
+  await handlePredictionsMenu({ ...ctx, callbackQuery: null, answerCbQuery: async () => {} });
+});
+
+bot.command('hotpicks', async (ctx) => {
+  await upsertUser(ctx.from);
+  if (!await canAccess(ctx.from.id, 'hotpicks')) {
+    return ctx.reply(getLockedMessage('hotpicks'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
+  }
+  await handleHotPicks({ ...ctx, callbackQuery: null });
+});
+
+bot.command('odds', async (ctx) => {
+  await upsertUser(ctx.from);
+  if (!await canAccess(ctx.from.id, 'odds')) {
+    return ctx.reply(getLockedMessage('odds'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
+  }
+  await handleTopOdds({ ...ctx, callbackQuery: null });
+});
+
+bot.command('h2h', async (ctx) => {
+  await upsertUser(ctx.from);
+  if (!await canAccess(ctx.from.id, 'h2h')) {
+    return ctx.reply(getLockedMessage('h2h'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
+  }
+  await handleH2HMenu({ ...ctx, callbackQuery: null, answerCbQuery: async () => {} });
+});
+
 bot.command('team', async (ctx) => {
   await upsertUser(ctx.from);
   const args = ctx.message.text.split(' ').slice(1).join(' ');
-  if (!args) return ctx.reply('Usage: /team Brazil', getBackMenu());
-
   if (!await canAccess(ctx.from.id, 'team')) {
     return ctx.reply(getLockedMessage('team'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
   }
-
+  if (!args) return handleTeamMenu(ctx);
   await handleTeamSearch(ctx, args);
 });
 
-// ── /broadcast (admin) ───────────────────────────────────
-bot.command('broadcast', async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply('⛔ Admin only.');
-  await handleAdminPanel(ctx);
+bot.command('notify', async (ctx) => {
+  await upsertUser(ctx.from);
+  await handleMyAlerts(ctx);
+});
+
+bot.command('referral', async (ctx) => {
+  await upsertUser(ctx.from);
+  const ref = await getOrCreateReferral(ctx.from.id);
+  const botInfo = await bot.telegram.getMe();
+  const { msg } = getReferralMessage(ref, botInfo.username);
+  await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...getBackMenu() });
+});
+
+bot.command('about', async (ctx) => {
+  await upsertUser(ctx.from);
+  await ctx.reply(getAboutMessage(), { parse_mode: 'MarkdownV2', ...getBackMenu() });
 });
 
 bot.command('admin', async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply('⛔ Admin only.');
+  await upsertUser(ctx.from);
   await handleAdminPanel(ctx);
 });
 
 bot.command('cancelbroadcast', async (ctx) => {
   pendingBroadcast.delete(ctx.from.id);
-  await ctx.reply('❌ Broadcast cancelled.');
+  pendingPromote.delete(ctx.from.id);
+  await ctx.reply('❌ Cancelled.');
 });
 
-// ── CALLBACK QUERY ROUTER ────────────────────────────────
+// ── CALLBACK ROUTER ──────────────────────────────────────
 bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
   const userId = ctx.from.id;
   await upsertUser(ctx.from);
 
-  // ── Navigation ──
   if (data === 'main_menu') {
     await ctx.answerCbQuery();
-    await ctx.reply('🏠 *Main Menu*', { parse_mode: 'MarkdownV2', ...getMainMenu() });
-    return;
+    return ctx.reply('🏠 *Main Menu*', { parse_mode: 'MarkdownV2', ...getMainMenu() });
   }
-
   if (data === 'about') {
     await ctx.answerCbQuery();
-    await ctx.reply(getAboutMessage(), { parse_mode: 'MarkdownV2', ...getBackMenu() });
-    return;
+    return ctx.reply(getAboutMessage(), { parse_mode: 'MarkdownV2', ...getBackMenu() });
   }
 
-  // ── Fixtures ──
   if (data === 'fixtures_today') return handleTodayFixtures(ctx);
   if (data === 'results') return handleResults(ctx);
   if (data === 'upcoming') return handleUpcoming(ctx);
-
-  // ── Live ──
   if (data === 'live_scores') return handleLiveScores(ctx);
-
-  // ── Standings ──
   if (data === 'standings') return handleStandings(ctx);
-  if (data.startsWith('group_')) {
-    return handleGroupStanding(ctx, data.replace('group_', ''));
-  }
+  if (data.startsWith('group_')) return handleGroupStanding(ctx, data.replace('group_', ''));
 
-  // ── Locked features check ──
   if (data === 'predictions_menu') {
     if (!await canAccess(userId, 'predictions')) {
-      await ctx.answerCbQuery('🔒 Feature locked!');
+      await ctx.answerCbQuery('🔒 Locked!');
       return ctx.reply(getLockedMessage('predictions'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
     }
     return handlePredictionsMenu(ctx);
   }
-
   if (data.startsWith('predict_')) {
     if (!await canAccess(userId, 'predictions')) {
-      await ctx.answerCbQuery('🔒 Feature locked!');
+      await ctx.answerCbQuery('🔒 Locked!');
       return ctx.reply(getLockedMessage('predictions'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
     }
     return handlePredictMatch(ctx, data.replace('predict_', ''));
   }
-
   if (data === 'hot_picks') {
     if (!await canAccess(userId, 'hotpicks')) {
-      await ctx.answerCbQuery('🔒 Feature locked!');
+      await ctx.answerCbQuery('🔒 Locked!');
       return ctx.reply(getLockedMessage('hotpicks'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
     }
     return handleHotPicks(ctx);
   }
-
   if (data === 'top_odds') {
     if (!await canAccess(userId, 'odds')) {
-      await ctx.answerCbQuery('🔒 Feature locked!');
+      await ctx.answerCbQuery('🔒 Locked!');
       return ctx.reply(getLockedMessage('odds'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
     }
     return handleTopOdds(ctx);
   }
-
   if (data === 'h2h_menu') {
     if (!await canAccess(userId, 'h2h')) {
-      await ctx.answerCbQuery('🔒 Feature locked!');
+      await ctx.answerCbQuery('🔒 Locked!');
       return ctx.reply(getLockedMessage('h2h'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
     }
     return handleH2HMenu(ctx);
   }
-
   if (data.startsWith('h2h_')) {
     if (!await canAccess(userId, 'h2h')) {
-      await ctx.answerCbQuery('🔒 Feature locked!');
+      await ctx.answerCbQuery('🔒 Locked!');
       return ctx.reply(getLockedMessage('h2h'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
     }
     return handleH2H(ctx, data.replace('h2h_', ''));
   }
-
   if (data === 'team_menu') {
     if (!await canAccess(userId, 'team')) {
-      await ctx.answerCbQuery('🔒 Feature locked!');
+      await ctx.answerCbQuery('🔒 Locked!');
       return ctx.reply(getLockedMessage('team'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
     }
     return handleTeamMenu(ctx);
   }
-
   if (data.startsWith('team_search_')) {
     if (!await canAccess(userId, 'team')) {
-      await ctx.answerCbQuery('🔒 Feature locked!');
+      await ctx.answerCbQuery('🔒 Locked!');
       return ctx.reply(getLockedMessage('team'), { parse_mode: 'MarkdownV2', ...getBackMenu() });
     }
     return handleTeamSearch(ctx, data.replace('team_search_', ''));
   }
 
-  // ── Alerts ──
   if (data === 'my_alerts') return handleMyAlerts(ctx);
   if (data === 'toggle_sub') return handleToggleSub(ctx);
   if (data === 'toggle_goals') return handleToggleGoals(ctx);
   if (data === 'toggle_kickoff') return handleToggleKickoff(ctx);
 
-  // ── Referral ──
   if (data === 'referral') {
     await ctx.answerCbQuery();
-    const refDoc = await getOrCreateReferral(userId);
+    const ref = await getOrCreateReferral(userId);
     const botInfo = await bot.telegram.getMe();
-    const { msg } = getReferralMessage(refDoc, botInfo.username);
+    const { msg } = getReferralMessage(ref, botInfo.username);
     return ctx.reply(msg, { parse_mode: 'MarkdownV2', ...getBackMenu() });
   }
 
-  // ── Admin ──
+  // Admin callbacks
   if (data === 'admin_broadcast') return handleAdminBroadcastPrompt(ctx);
+  if (data === 'admin_promote') return handleAdminPromotePrompt(ctx);
   if (data === 'admin_stats') return handleAdminStats(ctx);
   if (data === 'admin_panel') return handleAdminPanel(ctx);
-  if (data.startsWith('confirm_broadcast_')) return handleConfirmBroadcast(ctx);
+  if (data === 'confirm_broadcast') return handleConfirmBroadcast(ctx);
+  if (data === 'cancel_broadcast') return handleCancelBroadcast(ctx);
 
-  // Fallback
-  await ctx.answerCbQuery('Processing...');
+  await ctx.answerCbQuery();
 });
 
-// ── TEXT MESSAGE HANDLER (admin broadcast) ───────────────
+// ── TEXT MESSAGE HANDLER ─────────────────────────────────
 bot.on('text', async (ctx) => {
   await upsertUser(ctx.from);
+  const text = ctx.message.text;
+  if (text.startsWith('/')) return;
 
-  // Check if admin is in broadcast mode
-  if (isAdmin(ctx) && pendingBroadcast.get(ctx.from.id) === true) {
-    const handled = await handleAdminBroadcastMessage(ctx);
-    if (handled) return;
+  if (isAdmin(ctx)) {
+    // Check broadcast input
+    if (pendingBroadcast.get(ctx.from.id) === true) {
+      const handled = await handleAdminBroadcastMessage(ctx);
+      if (handled) return;
+    }
+    // Check promote input
+    if (pendingPromote.get(ctx.from.id) === true) {
+      const handled = await handleAdminPromoteMessage(ctx);
+      if (handled) return;
+    }
   }
 
-  // Default: show menu
-  if (ctx.message.text === '/start') return; // handled above
-  await ctx.reply('Use the menu to navigate 👇', getMainMenu());
+  await ctx.reply('👋 Use /menu to navigate or type a command like /live or /fixtures');
 });
 
 // ── ERROR HANDLER ────────────────────────────────────────
 bot.catch((err, ctx) => {
   console.error('Bot error:', err.message);
-  try {
-    ctx.reply('⚠️ Something went wrong. Please try again.', getBackMenu());
-  } catch (_) {}
+  try { ctx.reply('⚠️ Something went wrong. Please try again.'); } catch (_) {}
 });
 
-// ── SERVER ───────────────────────────────────────────────
+// ── SERVER + LAUNCH ──────────────────────────────────────
 const app = express();
 app.use(express.json());
 app.get('/', (req, res) => res.send('🏆 Cymor World Cup Bot is running!'));
-app.get('/health', (req, res) => res.json({ status: 'ok', bot: 'Cymor WC Bot 2026' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', bot: 'Cymor WC Bot 2026', time: new Date().toISOString() }));
 
-// ── LAUNCH ───────────────────────────────────────────────
 async function launch() {
   await connectDB();
-
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
-
+  const PORT = process.env.PORT || 10000;
+  app.listen(PORT, '0.0.0.0', () => console.log(`✅ Server running on port ${PORT}`));
   initCron(bot);
-
   await bot.launch();
   console.log('🚀 Cymor World Cup Bot is LIVE!');
 }
 
 launch().catch(console.error);
-
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
