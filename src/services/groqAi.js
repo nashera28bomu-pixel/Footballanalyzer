@@ -11,44 +11,56 @@ async function askGroq(prompt, systemPrompt = '') {
         ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
         { role: 'user', content: prompt }
       ],
-      max_tokens: 600,
-      temperature: 0.7
+      max_tokens: 800,
+      temperature: 0.5
     },
     {
       headers: {
         Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      timeout: 15000
+      timeout: 20000
     }
   );
   return res.data.choices[0].message.content;
 }
 
-const AI_SYSTEM = `You are CymorBot, a World Cup 2026 football analyst bot owned by Legendary Smiley Cymor.
-You give sharp, confident football predictions and analysis.
-Keep responses concise, punchy, and formatted for Telegram (plain text, no markdown symbols except emojis).
-Always include:
-- A clear prediction (who wins or draw)
-- Key reasons (2-3 bullet points max)
-- A confidence level (High/Medium/Low)
-- A recommended bet market
-Be direct. East African fans love confident analysis.`;
+const AI_SYSTEM = `You are CymorBot, an expert World Cup 2026 football analyst owned by Legendary Smiley Cymor.
+You give precise, data-driven predictions for East African football fans.
+CRITICAL RULES:
+- Output ONLY plain text. NO asterisks, NO underscores, NO markdown symbols. Emojis are fine.
+- Be specific: reference actual team strengths, recent WC form, tactical matchups, and draw probability
+- World Cup 2026 group stage has seen MANY draws - always weigh this seriously
+- Structure every prediction with: Verdict, Key Factors (3 points), Draw Risk, Recommended Bet
+- Be direct and confident. Never be vague.`;
 
-async function predictMatch(homeTeam, awayTeam, homeOdds, awayOdds, drawOdds, h2hData) {
-  const h2hSummary = h2hData ? buildH2HSummary(h2hData, homeTeam, awayTeam) : 'No H2H data available';
+async function predictMatch(homeTeam, awayTeam, homeOdds, awayOdds, drawOdds, h2hData, standings) {
+  const h2hSummary = h2hData ? buildH2HSummary(h2hData, homeTeam, awayTeam) : 'No previous meetings';
+  const standingsSummary = standings || 'Group standings not available';
 
-  const prompt = `World Cup 2026 Match Prediction:
-${homeTeam} vs ${awayTeam}
+  const prompt = `World Cup 2026 Match Prediction Request:
 
-Current Odds:
+Match: ${homeTeam} vs ${awayTeam}
+
+MARKET ODDS (bookmakers consensus):
 - ${homeTeam} Win: ${homeOdds || 'N/A'}
-- Draw: ${drawOdds || 'N/A'}  
+- Draw: ${drawOdds || 'N/A'}
 - ${awayTeam} Win: ${awayOdds || 'N/A'}
 
-Head-to-Head History: ${h2hSummary}
+HEAD-TO-HEAD HISTORY:
+${h2hSummary}
 
-Give your prediction and analysis. Be specific and confident.`;
+GROUP STAGE CONTEXT:
+${standingsSummary}
+
+TASK: Give a structured prediction covering:
+1. VERDICT: Your final prediction (Home Win / Draw / Away Win) and WHY
+2. KEY FACTORS: 3 specific tactical/form/historical reasons
+3. DRAW RISK: Honest assessment - many WC group games end in draws, is this one?
+4. BEST BET: Specific market recommendation (1X2, both teams to score, over/under, etc.)
+5. CONFIDENCE: High / Medium / Low with brief justification
+
+Remember: plain text only, no markdown, be analytical not generic.`;
 
   return askGroq(prompt, AI_SYSTEM);
 }
@@ -57,13 +69,15 @@ async function generateHotPicks(picks) {
   if (!picks || picks.length === 0) return 'No picks available at the moment.';
 
   const picksSummary = picks.map((p, i) =>
-    `${i + 1}. ${p.home} vs ${p.away} → Pick: ${p.pick} @ ${p.odds}`
+    `Pick ${i + 1}: ${p.home} vs ${p.away} - Recommended: ${p.pick} (${p.outcome}) at odds ${p.odds}`
   ).join('\n');
 
-  const prompt = `These are today's top World Cup 2026 value picks based on odds data:
+  const prompt = `Today's World Cup 2026 hot picks based on odds analysis:
 ${picksSummary}
 
-For each pick, give a confident reason why this is the right bet (1-2 sentences each). Be sharp and analytical.`;
+For each pick, give 2 sharp bullet points explaining WHY this is the right call.
+Consider: team quality gap, World Cup draw tendency, tactical matchup, odds value.
+Plain text only, no markdown symbols.`;
 
   return askGroq(prompt, AI_SYSTEM);
 }
@@ -74,37 +88,52 @@ async function analyzeH2H(homeTeam, awayTeam, h2hData) {
   const prompt = `Head-to-Head analysis for World Cup 2026:
 ${homeTeam} vs ${awayTeam}
 
-Historical meetings: ${summary}
+Historical data: ${summary}
 
-Give a detailed H2H analysis: who dominates, patterns, and what it means for this World Cup match.`;
+Analyze: dominant team, goal patterns, tendency for draws, psychological edge, and what history suggests for this World Cup meeting.
+Plain text only, no markdown.`;
 
   return askGroq(prompt, AI_SYSTEM);
 }
 
 function buildH2HSummary(h2hData, homeTeam, awayTeam) {
   const matches = h2hData.matches || [];
-  if (matches.length === 0) return 'No previous meetings found';
+  if (matches.length === 0) return 'No previous meetings on record';
 
   let homeWins = 0, awayWins = 0, draws = 0;
-  const recent = matches.slice(0, 5).map(m => {
-    const home = m.homeTeam?.name;
-    const away = m.awayTeam?.name;
-    const hg = m.score?.fullTime?.home ?? '?';
-    const ag = m.score?.fullTime?.away ?? '?';
-    const winner = m.score?.winner;
+  let homeGoalsTotal = 0, awayGoalsTotal = 0;
 
-    if (winner === 'HOME_TEAM') {
-      if (home === homeTeam) homeWins++; else awayWins++;
-    } else if (winner === 'AWAY_TEAM') {
-      if (away === awayTeam) awayWins++; else homeWins++;
-    } else {
+  const recent = matches.slice(0, 8).map(m => {
+    const mHome = m.homeTeam?.name || '?';
+    const mAway = m.awayTeam?.name || '?';
+    const hg = m.score?.fullTime?.home ?? 0;
+    const ag = m.score?.fullTime?.away ?? 0;
+    const winner = m.score?.winner;
+    const comp = m.competition?.name || '';
+    const date = m.utcDate?.split('T')[0] || '';
+
+    const isHomeAsHome = mHome === homeTeam;
+    if (winner === 'DRAW') {
       draws++;
+    } else if (
+      (winner === 'HOME_TEAM' && isHomeAsHome) ||
+      (winner === 'AWAY_TEAM' && !isHomeAsHome)
+    ) {
+      homeWins++;
+    } else {
+      awayWins++;
     }
 
-    return `${home} ${hg}-${ag} ${away} (${m.utcDate?.split('T')[0] || 'N/A'})`;
+    homeGoalsTotal += isHomeAsHome ? hg : ag;
+    awayGoalsTotal += isHomeAsHome ? ag : hg;
+
+    return `${mHome} ${hg}-${ag} ${mAway} (${date}, ${comp})`;
   });
 
-  return `Last ${recent.length} meetings: ${homeWins}W-${draws}D-${awayWins}L for ${homeTeam}. Recent: ${recent.join(', ')}`;
+  const total = homeWins + awayWins + draws;
+  return `${total} meetings: ${homeTeam} ${homeWins}W / ${draws}D / ${awayWins}W ${awayTeam}. ` +
+    `Goals: ${homeTeam} scored ${homeGoalsTotal}, ${awayTeam} scored ${awayGoalsTotal}. ` +
+    `Recent: ${recent.slice(0, 5).join(' | ')}`;
 }
 
 module.exports = {
