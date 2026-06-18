@@ -7,16 +7,17 @@ function escMd(text) {
   return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
-// Map of team short names for quick searching
 const POPULAR_TEAMS = [
   'Brazil', 'Argentina', 'France', 'England', 'Germany', 'Spain',
-  'Portugal', 'Netherlands', 'Belgium', 'Italy', 'Uruguay', 'Mexico',
-  'USA', 'Senegal', 'Morocco', 'Nigeria', 'Japan', 'South Korea',
-  'Australia', 'Croatia', 'Denmark', 'Switzerland', 'Poland', 'Serbia'
+  'Portugal', 'Netherlands', 'Morocco', 'Nigeria', 'USA', 'Mexico',
+  'Japan', 'South Korea', 'Croatia', 'Serbia', 'Uruguay', 'Ecuador',
+  'Senegal', 'Cameroon', 'Ghana', 'Australia', 'Denmark', 'Poland'
 ];
 
 async function handleTeamMenu(ctx) {
-  await ctx.answerCbQuery();
+  if (ctx.callbackQuery) {
+    try { await ctx.answerCbQuery(); } catch (_) {}
+  }
 
   const popularButtons = [];
   for (let i = 0; i < POPULAR_TEAMS.length; i += 3) {
@@ -28,13 +29,13 @@ async function handleTeamMenu(ctx) {
   popularButtons.push([Markup.button.callback('🏠 Main Menu', 'main_menu')]);
 
   await ctx.reply(
-    `🏴 *TEAM NEWS*\n\n_Select a team or type /team \\[name\\] to search:_\n\n_e\\.g\\. /team Brazil_`,
+    `🏴 *TEAM NEWS \\& SQUAD*\n\n_Select a team or type /team \\[name\\]_\n_e\\.g\\. /team Brazil_`,
     { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(popularButtons) }
   );
 }
 
 async function handleTeamSearch(ctx, teamName) {
-  const loadingMsg = await ctx.reply(`🏴 Looking up ${teamName}...`);
+  const loadingMsg = await ctx.reply(`🏴 Loading ${teamName} squad...`);
 
   try {
     const team = await footballApi.searchTeam(teamName);
@@ -42,7 +43,7 @@ async function handleTeamSearch(ctx, teamName) {
     if (!team) {
       await ctx.deleteMessage(loadingMsg.message_id);
       return ctx.reply(
-        `🏴 Team "*${escMd(teamName)}*" not found in World Cup 2026\\.\n\nTry another name or use /team \\[exact name\\]\\.`,
+        `🏴 "*${escMd(teamName)}*" not found in World Cup 2026\\.\n\nTry: /team Brazil or /team France`,
         { parse_mode: 'MarkdownV2', ...getBackMenu() }
       );
     }
@@ -65,45 +66,72 @@ async function sendTeamInfo(ctx, team) {
   const founded = team.founded || 'N/A';
   const venue = team.venue || 'N/A';
   const coach = team.coach?.name || 'N/A';
+  const coachNat = team.coach?.nationality || '';
   const squad = team.squad || [];
 
   let msg = `🏴 *${escMd(name)}* ${short ? `\\(${escMd(short)}\\)` : ''}\n`;
   msg += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
   msg += `🌍 *Country:* ${escMd(country)}\n`;
-  msg += `🏟️ *Venue:* ${escMd(venue)}\n`;
+  msg += `🏟️ *Home Venue:* ${escMd(venue)}\n`;
   msg += `📅 *Founded:* ${escMd(String(founded))}\n`;
-  msg += `👔 *Coach:* ${escMd(coach)}\n\n`;
+  msg += `👔 *Head Coach:* ${escMd(coach)}${coachNat ? ` \\(${escMd(coachNat)}\\)` : ''}\n\n`;
 
-  if (squad.length > 0) {
+  if (squad.length === 0) {
+    msg += `_Squad data not available for this team\\._\n`;
+  } else {
     // Group by position
-    const positions = { Goalkeeper: [], Defender: [], Midfielder: [], Forward: [] };
-    for (const p of squad) {
-      const pos = p.position || 'Midfielder';
-      if (positions[pos]) positions[pos].push(p);
-    }
+    const groups = {
+      Goalkeeper: [],
+      Defender: [],
+      Midfielder: [],
+      Forward: [],
+      Other: []
+    };
 
-    msg += `👥 *SQUAD*\n`;
-    msg += `────────────────────\n`;
+    for (const p of squad) {
+      const pos = p.position || 'Other';
+      if (groups[pos] !== undefined) groups[pos].push(p);
+      else groups.Other.push(p);
+    }
 
     const posEmoji = {
       Goalkeeper: '🧤',
       Defender: '🛡️',
       Midfielder: '⚙️',
-      Forward: '⚡'
+      Forward: '⚡',
+      Other: '👤'
     };
 
-    for (const [pos, players] of Object.entries(positions)) {
+    for (const [pos, players] of Object.entries(groups)) {
       if (players.length === 0) continue;
-      msg += `${posEmoji[pos]} *${escMd(pos)}s*\n`;
-      const names = players.slice(0, 5).map(p => escMd(p.name)).join(', ');
-      msg += `${names}${players.length > 5 ? ` \\+${players.length - 5} more` : ''}\n\n`;
+
+      msg += `${posEmoji[pos]} *${escMd(pos)}s* \\(${players.length}\\)\n`;
+
+      // Show all players with shirt number if available
+      const playerLines = players.map(p => {
+        const num = p.shirtNumber ? `\\#${p.shirtNumber} ` : '';
+        const nat = p.nationality ? ` \\[${escMd(p.nationality)}\\]` : '';
+        return `  ${num}${escMd(p.name)}${nat}`;
+      });
+
+      msg += playerLines.join('\n') + '\n\n';
     }
+
+    msg += `👥 *Total Squad:* ${squad.length} players\n`;
   }
 
   msg += `━━━━━━━━━━━━━━━━━━━━━━\n`;
   msg += `_Type /team \\[name\\] to search another team_`;
 
-  await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...getBackMenu() });
+  // Split if too long (Telegram 4096 char limit)
+  if (msg.length > 4000) {
+    const half = Math.floor(msg.length / 2);
+    const splitPoint = msg.lastIndexOf('\n', half);
+    await ctx.reply(msg.substring(0, splitPoint), { parse_mode: 'MarkdownV2' });
+    await ctx.reply(msg.substring(splitPoint), { parse_mode: 'MarkdownV2', ...getBackMenu() });
+  } else {
+    await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...getBackMenu() });
+  }
 }
 
 module.exports = { handleTeamMenu, handleTeamSearch };
