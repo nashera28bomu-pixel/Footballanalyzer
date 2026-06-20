@@ -322,15 +322,56 @@ app.use(express.json());
 app.get('/', (req, res) => res.send('🏆 Cymor World Cup Bot is running!'));
 app.get('/health', (req, res) => res.json({ status: 'ok', bot: 'Cymor WC Bot 2026', time: new Date().toISOString() }));
 
+async function launchBotWithRetry(maxRetries = 5) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await bot.launch();
+      console.log('🚀 Cymor World Cup Bot is LIVE!');
+      return;
+    } catch (err) {
+      const isRetryable = err.code === 502 || err.response?.error_code === 502 || err.message?.includes('502');
+      console.error(`Bot launch attempt ${attempt}/${maxRetries} failed:`, err.message);
+
+      if (!isRetryable || attempt === maxRetries) {
+        console.error('Bot launch failed permanently. Server will stay up; retrying launch in background...');
+        // Don't crash the process — keep retrying in the background every 30s
+        // so Render doesn't consider the deploy failed while Telegram is flaky.
+        scheduleBackgroundRetry();
+        return;
+      }
+
+      const delay = Math.min(5000 * attempt, 30000);
+      console.log(`Retrying bot.launch() in ${delay / 1000}s...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+function scheduleBackgroundRetry() {
+  setTimeout(async () => {
+    try {
+      await bot.launch();
+      console.log('🚀 Cymor World Cup Bot is LIVE! (background retry succeeded)');
+    } catch (err) {
+      console.error('Background retry failed:', err.message);
+      scheduleBackgroundRetry();
+    }
+  }, 30000);
+}
+
 async function launch() {
   await connectDB();
   const PORT = process.env.PORT || 10000;
   app.listen(PORT, '0.0.0.0', () => console.log(`✅ Server running on port ${PORT}`));
   initCron(bot);
-  await bot.launch();
-  console.log('🚀 Cymor World Cup Bot is LIVE!');
+  await launchBotWithRetry();
 }
 
-launch().catch(console.error);
+launch().catch((err) => {
+  // Never let a startup error kill the whole process —
+  // the Express server above keeps Render's health check green
+  // while we keep retrying the Telegram connection.
+  console.error('Launch error (non-fatal):', err.message);
+});
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
