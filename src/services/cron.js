@@ -1,4 +1,7 @@
 const cron = require('node-cron');
+const axios = require('axios');
+const http = require('http');
+const https = require('https');
 const footballApi = require('../services/footballApi');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
@@ -14,27 +17,52 @@ let bot = null;
 // In-memory set to prevent duplicate sends within same process cycle
 const recentlySent = new Set();
 
+// Reusable HTTP agent with keep-alive — prevents socket exhaustion/ECONNRESET
+// under repeated outbound calls on Render's free tier
+const keepAliveAxios = axios.create({
+  timeout: 8000,
+  httpAgent: new http.Agent({ keepAlive: true, maxSockets: 5 }),
+  httpsAgent: new https.Agent({ keepAlive: true, maxSockets: 5 })
+});
+
+// Prevent overlapping runs of the same job if one is still in-flight
+let liveCheckRunning = false;
+let kickoffCheckRunning = false;
+
 function initCron(botInstance) {
   bot = botInstance;
 
-  // Poll live matches every 60 seconds
-  cron.schedule('*/60 * * * * *', async () => {
-    await checkLiveMatches();
+  // Poll live matches every 60 seconds (use minute-based syntax, not "*/60" seconds — invalid)
+  cron.schedule('* * * * *', async () => {
+    if (liveCheckRunning) return; // skip if previous run still in progress
+    liveCheckRunning = true;
+    try {
+      await checkLiveMatches();
+    } finally {
+      liveCheckRunning = false;
+    }
   });
 
   // Check for upcoming kickoffs every 5 minutes
   cron.schedule('*/5 * * * *', async () => {
-    await checkUpcomingKickoffs();
+    if (kickoffCheckRunning) return;
+    kickoffCheckRunning = true;
+    try {
+      await checkUpcomingKickoffs();
+    } finally {
+      kickoffCheckRunning = false;
+    }
   });
 
-  // Keep-alive ping every 14 minutes to prevent Render sleep
-  cron.schedule('*/14 * * * *', async () => {
+  // Keep-alive ping every 10 minutes, offset from other jobs to avoid request pile-up
+  cron.schedule('3,13,23,33,43,53 * * * *', async () => {
     const url = process.env.RENDER_URL;
-    if (url) {
-      try {
-        const axios = require('axios');
-        await axios.get(`${url}/health`, { timeout: 5000 });
-      } catch (_) {}
+    if (!url) return;
+    try {
+      await keepAliveAxios.get(`${url}/health`);
+    } catch (err) {
+      // Network blips on free tier are expected — don't log noisily
+      console.warn('Keep-alive ping failed (non-fatal):', err.code || err.message);
     }
   });
 
@@ -48,11 +76,17 @@ async function checkLiveMatches() {
     const matches = data.matches || [];
 
     for (const match of matches) {
-      await processLiveMatch(match);
+      try {
+        await processLiveMatch(match);
+      } catch (matchErr) {
+        // Isolate failure to a single match so one bad record doesn't stop the rest
+        console.error('Process match error:', matchErr.message);
+      }
     }
   } catch (err) {
-    if (err.response?.status !== 429) {
-      console.error('Cron live check error:', err.message);
+    const code = err.code || err.response?.status;
+    if (code !== 429) {
+      console.warn('Cron live check error:', code || err.message);
     }
   }
 }
@@ -199,7 +233,8 @@ async function checkUpcomingKickoffs() {
       }
     }
   } catch (err) {
-    console.error('Kickoff check error:', err.message);
+    const code = err.code || err.response?.status;
+    console.warn('Kickoff check error:', code || err.message);
   }
 }
 
