@@ -3,6 +3,17 @@ const { Telegraf, session } = require('telegraf');
 const mongoose = require('mongoose');
 const express = require('express');
 
+// ── GLOBAL SAFETY NETS ───────────────────────────────────
+// Network blips (ECONNRESET, socket hang up, timeouts) from outbound API
+// calls must never crash the whole bot process. Log and keep running.
+process.on('unhandledRejection', (reason) => {
+  console.warn('Unhandled rejection (non-fatal):', reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception (non-fatal):', err.message);
+  // Do NOT process.exit() here — keep the bot and server alive
+});
+
 const User = require('./models/User');
 const { initCron } = require('./services/cron');
 const {
