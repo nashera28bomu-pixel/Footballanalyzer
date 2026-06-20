@@ -168,7 +168,7 @@ async function handlePredictMatch(ctx, matchId) {
 
   } catch (err) {
     await ctx.deleteMessage(loadingMsg.message_id);
-    console.error('Predict match error:', err.message);
+    console.error('Predict match error:', err.response?.data?.error?.message || err.message);
     await ctx.reply(
       `⚠️ Prediction failed\\. This usually means the AI is temporarily busy\\.\n\n_Please try again in 30 seconds\\._`,
       { parse_mode: 'MarkdownV2', ...getBackMenu() }
