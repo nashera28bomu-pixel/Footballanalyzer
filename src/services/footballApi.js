@@ -1,4 +1,6 @@
 const axios = require('axios');
+const http = require('http');
+const https = require('https');
 
 const BASE_URL = 'https://api.football-data.org/v4';
 const WC_ID = 2000; // FIFA World Cup competition ID
@@ -8,7 +10,9 @@ const client = axios.create({
   headers: {
     'X-Auth-Token': process.env.FOOTBALL_API_KEY
   },
-  timeout: 10000
+  timeout: 10000,
+  httpAgent: new http.Agent({ keepAlive: true, maxSockets: 5 }),
+  httpsAgent: new https.Agent({ keepAlive: true, maxSockets: 5 })
 });
 
 // Cache to avoid hammering the API (10 min cache)
