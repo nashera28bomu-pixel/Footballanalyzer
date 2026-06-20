@@ -1,103 +1,107 @@
 const axios = require('axios');
+const { askGemini } = require('./geminiAi');
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-async function askGroq(prompt, systemPrompt = '') {
-  const res = await axios.post(
-    GROQ_URL,
-    {
-      model: 'llama3-8b-8192',
-      messages: [
-        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 800,
-      temperature: 0.5
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-        'Content-Type': 'application/json'
+const AI_SYSTEM = `You are CymorBot, an expert World Cup 2026 football analyst for East African fans.
+STRICT OUTPUT RULES:
+- Plain text ONLY. Zero asterisks, zero underscores, zero markdown symbols at all.
+- Emojis are allowed and encouraged.
+- Structure your answer clearly with line breaks.
+- Be specific, data-driven, and confident.
+- Always consider draw probability — many World Cup group games end 0-0 or 1-1.`;
+
+async function askAI(prompt, systemPrompt = '') {
+  // Try Groq first, fall back to Gemini
+  try {
+    const res = await axios.post(
+      GROQ_URL,
+      {
+        model: 'llama3-8b-8192',
+        messages: [
+          ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 800,
+        temperature: 0.5
       },
-      timeout: 20000
-    }
-  );
-  return res.data.choices[0].message.content;
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+    const text = res.data?.choices?.[0]?.message?.content;
+    if (!text) throw new Error('Empty Groq response');
+    return text.trim();
+  } catch (groqErr) {
+    console.warn('Groq failed, falling back to Gemini:', groqErr.message);
+    // Gemini fallback
+    return await askGemini(prompt, systemPrompt);
+  }
 }
 
-const AI_SYSTEM = `You are CymorBot, an expert World Cup 2026 football analyst owned by Legendary Smiley Cymor.
-You give precise, data-driven predictions for East African football fans.
-CRITICAL RULES:
-- Output ONLY plain text. NO asterisks, NO underscores, NO markdown symbols. Emojis are fine.
-- Be specific: reference actual team strengths, recent WC form, tactical matchups, and draw probability
-- World Cup 2026 group stage has seen MANY draws - always weigh this seriously
-- Structure every prediction with: Verdict, Key Factors (3 points), Draw Risk, Recommended Bet
-- Be direct and confident. Never be vague.`;
+// Legacy export so existing code still works
+async function askGroq(prompt, systemPrompt = '') {
+  return askAI(prompt, systemPrompt);
+}
 
-async function predictMatch(homeTeam, awayTeam, homeOdds, awayOdds, drawOdds, h2hData, standings) {
-  const h2hSummary = h2hData ? buildH2HSummary(h2hData, homeTeam, awayTeam) : 'No previous meetings';
-  const standingsSummary = standings || 'Group standings not available';
+async function predictMatch(homeTeam, awayTeam, homeOdds, awayOdds, drawOdds, h2hData, standingsCtx) {
+  const h2hSummary = h2hData ? buildH2HSummary(h2hData, homeTeam, awayTeam) : 'No previous meetings on record';
 
-  const prompt = `World Cup 2026 Match Prediction Request:
+  const prompt = `World Cup 2026 Match Prediction:
 
-Match: ${homeTeam} vs ${awayTeam}
+MATCH: ${homeTeam} vs ${awayTeam}
 
-MARKET ODDS (bookmakers consensus):
-- ${homeTeam} Win: ${homeOdds || 'N/A'}
-- Draw: ${drawOdds || 'N/A'}
-- ${awayTeam} Win: ${awayOdds || 'N/A'}
+BOOKMAKER ODDS:
+${homeTeam} Win: ${homeOdds || 'N/A'}
+Draw: ${drawOdds || 'N/A'}
+${awayTeam} Win: ${awayOdds || 'N/A'}
 
 HEAD-TO-HEAD HISTORY:
 ${h2hSummary}
 
-GROUP STAGE CONTEXT:
-${standingsSummary}
+GROUP STANDINGS CONTEXT:
+${standingsCtx || 'Not available'}
 
-TASK: Give a structured prediction covering:
-1. VERDICT: Your final prediction (Home Win / Draw / Away Win) and WHY
-2. KEY FACTORS: 3 specific tactical/form/historical reasons
-3. DRAW RISK: Honest assessment - many WC group games end in draws, is this one?
-4. BEST BET: Specific market recommendation (1X2, both teams to score, over/under, etc.)
-5. CONFIDENCE: High / Medium / Low with brief justification
+Give a structured prediction with these exact sections:
 
-Remember: plain text only, no markdown, be analytical not generic.`;
+VERDICT: [Your final call - Home Win / Draw / Away Win and a one-line reason]
 
-  return askGroq(prompt, AI_SYSTEM);
-}
+KEY FACTORS:
+1. [Tactical or form-based reason]
+2. [Historical or statistical reason]
+3. [Pressure/motivation/stakes reason]
 
-async function generateHotPicks(picks) {
-  if (!picks || picks.length === 0) return 'No picks available at the moment.';
+DRAW RISK: [Low/Medium/High] - [One sentence why draws are or aren't likely here]
 
-  const picksSummary = picks.map((p, i) =>
-    `Pick ${i + 1}: ${p.home} vs ${p.away} - Recommended: ${p.pick} (${p.outcome}) at odds ${p.odds}`
-  ).join('\n');
+BEST BET: [Specific market e.g. "Both teams to score - Yes", "Over 2.5 goals", "Draw or ${homeTeam}" etc]
 
-  const prompt = `Today's World Cup 2026 hot picks based on odds analysis:
-${picksSummary}
+CONFIDENCE: [50-95]% - [One sentence justification]
 
-For each pick, give 2 sharp bullet points explaining WHY this is the right call.
-Consider: team quality gap, World Cup draw tendency, tactical matchup, odds value.
-Plain text only, no markdown symbols.`;
+Plain text only. No asterisks or markdown.`;
 
-  return askGroq(prompt, AI_SYSTEM);
+  return askAI(prompt, AI_SYSTEM);
 }
 
 async function analyzeH2H(homeTeam, awayTeam, h2hData) {
   const summary = buildH2HSummary(h2hData, homeTeam, awayTeam);
 
-  const prompt = `Head-to-Head analysis for World Cup 2026:
-${homeTeam} vs ${awayTeam}
+  const prompt = `Head-to-Head analysis for World Cup 2026: ${homeTeam} vs ${awayTeam}
 
 Historical data: ${summary}
 
-Analyze: dominant team, goal patterns, tendency for draws, psychological edge, and what history suggests for this World Cup meeting.
-Plain text only, no markdown.`;
+Analyze: dominant team overall, goal patterns, how often they draw, psychological edge going into this World Cup game, and what history tells us about the likely result.
 
-  return askGroq(prompt, AI_SYSTEM);
+Plain text only, no markdown or asterisks.`;
+
+  return askAI(prompt, AI_SYSTEM);
 }
 
 function buildH2HSummary(h2hData, homeTeam, awayTeam) {
-  const matches = h2hData.matches || [];
+  const matches = h2hData?.matches || [];
   if (matches.length === 0) return 'No previous meetings on record';
 
   let homeWins = 0, awayWins = 0, draws = 0;
@@ -111,18 +115,14 @@ function buildH2HSummary(h2hData, homeTeam, awayTeam) {
     const winner = m.score?.winner;
     const comp = m.competition?.name || '';
     const date = m.utcDate?.split('T')[0] || '';
-
     const isHomeAsHome = mHome === homeTeam;
-    if (winner === 'DRAW') {
-      draws++;
-    } else if (
+
+    if (winner === 'DRAW') draws++;
+    else if (
       (winner === 'HOME_TEAM' && isHomeAsHome) ||
       (winner === 'AWAY_TEAM' && !isHomeAsHome)
-    ) {
-      homeWins++;
-    } else {
-      awayWins++;
-    }
+    ) homeWins++;
+    else awayWins++;
 
     homeGoalsTotal += isHomeAsHome ? hg : ag;
     awayGoalsTotal += isHomeAsHome ? ag : hg;
@@ -131,15 +131,15 @@ function buildH2HSummary(h2hData, homeTeam, awayTeam) {
   });
 
   const total = homeWins + awayWins + draws;
-  return `${total} meetings: ${homeTeam} ${homeWins}W / ${draws}D / ${awayWins}W ${awayTeam}. ` +
-    `Goals: ${homeTeam} scored ${homeGoalsTotal}, ${awayTeam} scored ${awayGoalsTotal}. ` +
-    `Recent: ${recent.slice(0, 5).join(' | ')}`;
+  return `${total} meetings total. ${homeTeam}: ${homeWins}W / ${draws}D / ${awayWins}W ${awayTeam}. ` +
+    `Goals scored: ${homeTeam} ${homeGoalsTotal}, ${awayTeam} ${awayGoalsTotal}. ` +
+    `Last 5 results: ${recent.slice(0, 5).join(' | ')}`;
 }
 
 module.exports = {
   askGroq,
+  askAI,
   predictMatch,
-  generateHotPicks,
   analyzeH2H,
   buildH2HSummary
 };
